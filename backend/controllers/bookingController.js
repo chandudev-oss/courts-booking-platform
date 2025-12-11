@@ -7,6 +7,9 @@ const {
   isEquipmentAvailable
 } = require('../utils/availabilityChecker');
 
+// Convert any date to normalized UTC
+const toUTC = (date) => new Date(new Date(date).toISOString());
+
 exports.createBooking = async (req, res) => {
   const session = await Booking.db.startSession();
   session.startTransaction();
@@ -21,18 +24,21 @@ exports.createBooking = async (req, res) => {
       return res.status(400).json({ message: 'courtId, startTime, and endTime are required' });
     }
 
-    // Validate time
+    // Convert to Date objects
     const start = new Date(startTime);
     const end = new Date(endTime);
-    
-    // Check if dates are valid
-    if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+
+    // Convert everything to UTC and use these consistently
+    const startUTC = toUTC(start);
+    const endUTC = toUTC(end);
+
+    if (isNaN(startUTC.getTime()) || isNaN(endUTC.getTime())) {
       await session.abortTransaction();
       await session.endSession();
       return res.status(400).json({ message: 'Invalid date format for startTime or endTime' });
     }
-    
-    if (end <= start) {
+
+    if (endUTC <= startUTC) {
       await session.abortTransaction();
       await session.endSession();
       return res.status(400).json({ message: 'End time must be after start time' });
@@ -46,7 +52,7 @@ exports.createBooking = async (req, res) => {
     }
 
     // Check court availability
-    const courtAvailable = await isCourtAvailable(courtId, startTime, endTime);
+    const courtAvailable = await isCourtAvailable(courtId, startUTC, endUTC);
     if (!courtAvailable) {
       await session.abortTransaction();
       await session.endSession();
@@ -60,7 +66,8 @@ exports.createBooking = async (req, res) => {
         await session.endSession();
         return res.status(400).json({ message: 'Invalid coachId format' });
       }
-      const coachAvailable = await isCoachAvailable(coachId, startTime, endTime);
+
+      const coachAvailable = await isCoachAvailable(coachId, startUTC, endUTC);
       if (!coachAvailable) {
         await session.abortTransaction();
         await session.endSession();
@@ -70,14 +77,12 @@ exports.createBooking = async (req, res) => {
 
     // Check equipment availability
     if (equipment && equipment.length > 0) {
-      // Validate equipment array format
       if (!Array.isArray(equipment)) {
         await session.abortTransaction();
         await session.endSession();
         return res.status(400).json({ message: 'Equipment must be an array' });
       }
-      
-      // Validate each equipment item
+
       for (const item of equipment) {
         if (!item.equipmentId || !mongoose.Types.ObjectId.isValid(item.equipmentId)) {
           await session.abortTransaction();
@@ -90,8 +95,8 @@ exports.createBooking = async (req, res) => {
           return res.status(400).json({ message: 'Equipment quantity must be a non-negative number' });
         }
       }
-      
-      const equipmentCheck = await isEquipmentAvailable(equipment, startTime, endTime);
+
+      const equipmentCheck = await isEquipmentAvailable(equipment, startUTC, endUTC);
       if (!equipmentCheck.available) {
         await session.abortTransaction();
         await session.endSession();
@@ -99,11 +104,11 @@ exports.createBooking = async (req, res) => {
       }
     }
 
-    // Calculate pricing
+    // Calculate pricing with UTC times
     const pricingBreakdown = await calculatePricing({
       courtId,
-      startTime,
-      endTime,
+      startTime: startUTC,
+      endTime: endUTC,
       equipment,
       coachId
     });
@@ -112,8 +117,8 @@ exports.createBooking = async (req, res) => {
     const booking = new Booking({
       user: req.user._id,
       court: courtId,
-      startTime: start,
-      endTime: end,
+      startTime: startUTC,
+      endTime: endUTC,
       resources: {
         equipment: equipment || [],
         coach: coachId || null
@@ -123,10 +128,9 @@ exports.createBooking = async (req, res) => {
     });
 
     await booking.save({ session });
-
     await session.commitTransaction();
-    
-    // Populate after commit to avoid transaction issues
+
+    // Populate returned object
     try {
       await booking.populate('court', 'name type basePrice');
       if (coachId) {
@@ -137,7 +141,6 @@ exports.createBooking = async (req, res) => {
       }
     } catch (populateError) {
       console.error('Error populating booking:', populateError);
-      // Continue even if populate fails - booking is already saved
     }
 
     res.status(201).json(booking);
@@ -146,8 +149,7 @@ exports.createBooking = async (req, res) => {
       await session.abortTransaction();
     }
     console.error(error);
-    
-    // Handle specific error types
+
     if (error.name === 'ValidationError') {
       res.status(400).json({ message: 'Validation error', error: error.message });
     } else if (error.name === 'CastError') {
@@ -167,7 +169,7 @@ exports.getUserBookings = async (req, res) => {
       .populate('resources.coach', 'name expertise hourlyRate')
       .populate('resources.equipment.equipmentId', 'name perUnitFee')
       .sort({ startTime: -1 });
-    
+
     res.json(bookings);
   } catch (error) {
     console.error(error);
@@ -183,7 +185,7 @@ exports.getAllBookings = async (req, res) => {
       .populate('resources.coach', 'name expertise hourlyRate')
       .populate('resources.equipment.equipmentId', 'name perUnitFee')
       .sort({ startTime: -1 });
-    
+
     res.json(bookings);
   } catch (error) {
     console.error(error);
@@ -193,18 +195,16 @@ exports.getAllBookings = async (req, res) => {
 
 exports.cancelBooking = async (req, res) => {
   try {
-    const mongoose = require('mongoose');
     if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
       return res.status(400).json({ message: 'Invalid booking ID format' });
     }
-    
+
     const booking = await Booking.findById(req.params.id);
-    
+
     if (!booking) {
       return res.status(404).json({ message: 'Booking not found' });
     }
 
-    // Check if user owns the booking or is admin
     if (booking.user.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
       return res.status(403).json({ message: 'Not authorized to cancel this booking' });
     }
@@ -218,4 +218,3 @@ exports.cancelBooking = async (req, res) => {
     res.status(500).json({ message: 'Server error' });
   }
 };
-
