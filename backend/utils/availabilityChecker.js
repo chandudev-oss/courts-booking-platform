@@ -3,16 +3,26 @@ const Coach = require('../models/Coach');
 const Equipment = require('../models/Equipment');
 
 /**
- * Check if court is available for the given time slot
+ * Convert any incoming time to UTC Date object
+ */
+function toUTC(date) {
+  return new Date(new Date(date).toISOString());
+}
+
+/**
+ * Court availability check
  */
 async function isCourtAvailable(courtId, startTime, endTime, excludeBookingId = null) {
+  const startUTC = toUTC(startTime);
+  const endUTC = toUTC(endTime);
+
   const query = {
     court: courtId,
     status: 'confirmed',
     $or: [
       {
-        startTime: { $lt: new Date(endTime) },
-        endTime: { $gt: new Date(startTime) }
+        startTime: { $lt: endUTC },
+        endTime: { $gt: startUTC }
       }
     ]
   };
@@ -22,11 +32,12 @@ async function isCourtAvailable(courtId, startTime, endTime, excludeBookingId = 
   }
 
   const conflictingBooking = await Booking.findOne(query);
+
   return !conflictingBooking;
 }
 
 /**
- * Check if coach is available for the given time slot
+ * Coach availability check
  */
 async function isCoachAvailable(coachId, startTime, endTime, excludeBookingId = null) {
   const coach = await Coach.findById(coachId);
@@ -34,42 +45,37 @@ async function isCoachAvailable(coachId, startTime, endTime, excludeBookingId = 
     return false;
   }
 
-  // Check coach working hours using minutes to avoid boundary issues
-  const bookingStart = new Date(startTime);
-  const bookingEnd = new Date(endTime);
-  const dayOfWeek = bookingStart.getDay();
-  const startMinutes = bookingStart.getHours() * 60 + bookingStart.getMinutes();
-  const endMinutes = bookingEnd.getHours() * 60 + bookingEnd.getMinutes();
+  const bookingStart = toUTC(startTime);
+  const bookingEnd = toUTC(endTime);
 
-  // Must be within the same day for availability checks
-  if (bookingStart.getDay() !== bookingEnd.getDay()) {
-    return false;
+  // Working hours must use local hours
+  const dayOfWeek = bookingStart.getUTCDay();
+  const startMinutes = bookingStart.getUTCHours() * 60 + bookingStart.getUTCMinutes();
+  const endMinutes = bookingEnd.getUTCHours() * 60 + bookingEnd.getUTCMinutes();
+
+  if (bookingStart.getUTCDate() !== bookingEnd.getUTCDate()) {
+    return false; // Must be same-day booking
   }
 
   const available = coach.availability.some((avail) => {
-    if (avail.dayOfWeek !== dayOfWeek) {
-      return false;
-    }
+    if (avail.dayOfWeek !== dayOfWeek) return false;
 
-    const availStartMinutes = avail.startHour * 60;
-    const availEndMinutes = avail.endHour * 60;
+    const availStart = avail.startHour * 60;
+    const availEnd = avail.endHour * 60;
 
-    // booking must start at/after avail start and end at/before avail end
-    return startMinutes >= availStartMinutes && endMinutes <= availEndMinutes;
+    return startMinutes >= availStart && endMinutes <= availEnd;
   });
 
-  if (!available) {
-    return false;
-  }
+  if (!available) return false;
 
-  // Check for conflicting bookings
+  // Check for existing bookings
   const query = {
     'resources.coach': coachId,
     status: 'confirmed',
     $or: [
       {
-        startTime: { $lt: new Date(endTime) },
-        endTime: { $gt: new Date(startTime) }
+        startTime: { $lt: bookingEnd },
+        endTime: { $gt: bookingStart }
       }
     ]
   };
@@ -78,28 +84,30 @@ async function isCoachAvailable(coachId, startTime, endTime, excludeBookingId = 
     query._id = { $ne: excludeBookingId };
   }
 
-  const conflictingBooking = await Booking.findOne(query);
-  return !conflictingBooking;
+  const conflicted = await Booking.findOne(query);
+  return !conflicted;
 }
 
 /**
- * Check if equipment is available in sufficient quantity
+ * Equipment availability
  */
 async function isEquipmentAvailable(equipmentRequests, startTime, endTime, excludeBookingId = null) {
-  for (const request of equipmentRequests) {
-    const equipment = await Equipment.findById(request.equipmentId);
+  const startUTC = toUTC(startTime);
+  const endUTC = toUTC(endTime);
+
+  for (const req of equipmentRequests) {
+    const equipment = await Equipment.findById(req.equipmentId);
     if (!equipment || !equipment.isActive) {
-      return { available: false, message: `Equipment ${request.equipmentId} not found or inactive` };
+      return { available: false, message: `Equipment ${req.equipmentId} not found or inactive` };
     }
 
-    // Get all bookings that overlap with this time slot
     const query = {
       status: 'confirmed',
-      'resources.equipment.equipmentId': request.equipmentId,
+      'resources.equipment.equipmentId': req.equipmentId,
       $or: [
         {
-          startTime: { $lt: new Date(endTime) },
-          endTime: { $gt: new Date(startTime) }
+          startTime: { $lt: endUTC },
+          endTime: { $gt: startUTC }
         }
       ]
     };
@@ -108,25 +116,22 @@ async function isEquipmentAvailable(equipmentRequests, startTime, endTime, exclu
       query._id = { $ne: excludeBookingId };
     }
 
-    const overlappingBookings = await Booking.find(query);
-    
-    // Calculate total booked quantity
+    const bookings = await Booking.find(query);
+
     let bookedQuantity = 0;
-    overlappingBookings.forEach(booking => {
-      const equipmentItem = booking.resources.equipment.find(
-        item => item.equipmentId.toString() === request.equipmentId.toString()
+    bookings.forEach(booking => {
+      const item = booking.resources.equipment.find(
+        e => e.equipmentId.toString() === req.equipmentId.toString()
       );
-      if (equipmentItem) {
-        bookedQuantity += equipmentItem.quantity;
-      }
+      if (item) bookedQuantity += item.quantity;
     });
 
     const availableStock = equipment.totalStock - bookedQuantity;
-    
-    if (availableStock < request.quantity) {
-      return { 
-        available: false, 
-        message: `Insufficient stock for ${equipment.name}. Available: ${availableStock}, Requested: ${request.quantity}` 
+
+    if (availableStock < req.quantity) {
+      return {
+        available: false,
+        message: `Insufficient stock for ${equipment.name}. Available: ${availableStock}, Requested: ${req.quantity}`
       };
     }
   }
@@ -139,4 +144,3 @@ module.exports = {
   isCoachAvailable,
   isEquipmentAvailable
 };
-
