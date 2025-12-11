@@ -1,6 +1,17 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { bookingsAPI, coachesAPI, equipmentAPI, pricingAPI } from '../services/api';
 
+// Convert local time to ISO-like format WITHOUT timezone (VERY IMPORTANT)
+const formatLocalToISO = (date) => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  const hours = String(date.getHours()).padStart(2, '0');
+  const mins = String(date.getMinutes()).padStart(2, '0');
+
+  return `${year}-${month}-${day}T${hours}:${mins}:00`; // local time, no Z
+};
+
 const BookingModal = ({ court, startTime, endTime, onClose, onSuccess }) => {
   const [coaches, setCoaches] = useState([]);
   const [equipment, setEquipment] = useState([]);
@@ -20,9 +31,10 @@ const BookingModal = ({ court, startTime, endTime, onClose, onSuccess }) => {
     if (!court || !startTime || !endTime) {
       return;
     }
-    
+
     setCalculating(true);
     setError(null);
+
     try {
       const equipmentArray = Object.entries(equipmentQuantities)
         .filter(([_, qty]) => qty > 0)
@@ -30,8 +42,8 @@ const BookingModal = ({ court, startTime, endTime, onClose, onSuccess }) => {
 
       const response = await pricingAPI.estimate({
         courtId: court._id,
-        startTime: startTime.toISOString(),
-        endTime: endTime.toISOString(),
+        startTime: formatLocalToISO(startTime),
+        endTime: formatLocalToISO(endTime),
         equipment: equipmentArray,
         coachId: selectedCoach || null,
       });
@@ -39,11 +51,7 @@ const BookingModal = ({ court, startTime, endTime, onClose, onSuccess }) => {
       setPricing(response.data);
     } catch (error) {
       console.error('Error calculating price:', error);
-      if (error.code === 'ERR_NETWORK' || error.message?.includes('ERR_EMPTY_RESPONSE')) {
-        setError('Unable to calculate price. Please ensure the backend server is running.');
-      } else {
-        setError('Failed to calculate price. Please try again.');
-      }
+      setError('Failed to calculate price. Please try again.');
     } finally {
       setCalculating(false);
     }
@@ -78,7 +86,6 @@ const BookingModal = ({ court, startTime, endTime, onClose, onSuccess }) => {
     }
   };
 
-
   const handleEquipmentChange = (equipmentId, quantity) => {
     setEquipmentQuantities({
       ...equipmentQuantities,
@@ -98,18 +105,16 @@ const BookingModal = ({ court, startTime, endTime, onClose, onSuccess }) => {
 
       await bookingsAPI.create({
         courtId: court._id,
-        startTime: startTime.toISOString(),
-        endTime: endTime.toISOString(),
+        startTime: formatLocalToISO(startTime),
+        endTime: formatLocalToISO(endTime),
         equipment: equipmentArray,
         coachId: selectedCoach || null,
       });
 
       onSuccess();
     } catch (error) {
-      const errorMessage = error.response?.data?.message || 
-                          (error.code === 'ERR_NETWORK' || error.message?.includes('ERR_EMPTY_RESPONSE')
-                            ? 'Unable to connect to the server. Please ensure the backend is running.'
-                            : 'Booking failed. Please try again.');
+      console.error("Booking error:", error);
+      const errorMessage = error.response?.data?.message || 'Booking failed. Please try again.';
       setError(errorMessage);
     } finally {
       setLoading(false);
@@ -119,6 +124,7 @@ const BookingModal = ({ court, startTime, endTime, onClose, onSuccess }) => {
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
       <div className="bg-white rounded-lg p-6 max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto">
+
         <div className="flex justify-between items-center mb-4">
           <h2 className="text-2xl font-bold">Book {court.name}</h2>
           <button onClick={onClose} className="text-gray-500 hover:text-gray-700">
@@ -239,10 +245,10 @@ const BookingModal = ({ court, startTime, endTime, onClose, onSuccess }) => {
             </button>
           </div>
         </form>
+
       </div>
     </div>
   );
 };
 
 export default BookingModal;
-
